@@ -2,7 +2,21 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use std::cell::RefCell;
+use std::fs::File;
+use std::process::Command;
 use std::rc::Rc;
+
+fn capture_screen() -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("grim")
+        .arg("/tmp/snap-background.png")
+        .status()?;
+
+    if !status.success() {
+        return Err("Failed to capture screen".into());
+    }
+
+    Ok(())
+}
 
 #[derive(Default, Clone, Copy)]
 struct Selection {
@@ -15,6 +29,11 @@ struct Selection {
 }
 
 fn main() {
+    if let Err(error) = capture_screen() {
+        eprintln!("Screen capture failed: {error}");
+        return;
+    }
+
     let app = gtk::Application::builder()
         .application_id("com.timkuessner.snap")
         .build();
@@ -53,12 +72,31 @@ fn main() {
 
         let draw_selection = selection.clone();
 
+        let draw_selection = selection.clone();
+
         area.set_draw_func(move |_, cr, width, height| {
             let s = draw_selection.borrow();
 
+            let screenshot = match File::open("/tmp/snap-background.png") {
+                Ok(mut file) => match gtk::cairo::ImageSurface::create_from_png(&mut file) {
+                    Ok(surface) => surface,
+                    Err(error) => {
+                        eprintln!("Could not load screenshot: {error}");
+                        return;
+                    }
+                },
+                Err(error) => {
+                    eprintln!("Could not open screenshot: {error}");
+                    return;
+                }
+            };
+
+            let _ = cr.set_source_surface(&screenshot, 0.0, 0.0);
+            let _ = cr.paint();
+
             cr.set_operator(gtk::cairo::Operator::Over);
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
-            cr.paint().unwrap();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+            let _ = cr.paint();
 
             if s.dragging || s.finished {
                 let x = s.start_x.min(s.end_x);
@@ -66,16 +104,19 @@ fn main() {
                 let w = (s.end_x - s.start_x).abs();
                 let h = (s.end_y - s.start_y).abs();
 
-                cr.set_operator(gtk::cairo::Operator::Clear);
+                cr.save().unwrap();
                 cr.rectangle(x, y, w, h);
-                cr.fill().unwrap();
+                cr.clip();
 
-                cr.set_operator(gtk::cairo::Operator::Over);
+                let _ = cr.set_source_surface(&screenshot, 0.0, 0.0);
+                let _ = cr.paint();
+
+                cr.restore().unwrap();
 
                 cr.set_source_rgb(1.0, 1.0, 1.0);
                 cr.set_line_width(2.0);
                 cr.rectangle(x, y, w, h);
-                cr.stroke().unwrap();
+                let _ = cr.stroke();
             }
 
             let _ = (width, height);
