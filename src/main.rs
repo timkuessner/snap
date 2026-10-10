@@ -32,6 +32,7 @@ struct Selection {
     end_y: f64,
     dragging: bool,
     finished: bool,
+    text_mode: bool,
 }
 
 impl Selection {
@@ -45,19 +46,71 @@ impl Selection {
     }
 }
 
-fn button_center(s: &Selection, area_width: f64) -> (f64, f64) {
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    Save,
+    Text,
+}
+
+const BUTTONS: [Action; 2] = [Action::Save, Action::Text];
+
+fn button_center(s: &Selection, index: usize) -> (f64, f64) {
     let (x, y, w, _) = s.rect();
 
     let mut cx = x + w - BUTTON_RADIUS;
 
-    let cy = if y - 2.0 * BUTTON_RADIUS - BUTTON_MARGIN< 0.0 {
+    let cy = if y - 2.0 * BUTTON_RADIUS - BUTTON_MARGIN < 0.0 {
         cx -= BUTTON_MARGIN;
         y + BUTTON_RADIUS + BUTTON_MARGIN
     } else {
         y - BUTTON_RADIUS - BUTTON_MARGIN
     };
 
+    cx -= index as f64 * (2.0 * BUTTON_RADIUS + BUTTON_MARGIN);
+
     (cx, cy)
+}
+
+fn draw_button_background(cr: &gtk::cairo::Context, cx: f64, cy: f64, active: bool) {
+    cr.arc(cx, cy, BUTTON_RADIUS, 0.0, std::f64::consts::TAU);
+    if active {
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+    } else {
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+    }
+    let _ = cr.fill_preserve();
+
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    cr.set_line_width(2.0);
+    let _ = cr.stroke();
+}
+
+fn draw_button(cr: &gtk::cairo::Context, action: Action, cx: f64, cy: f64, active: bool) {
+    draw_button_background(cr, cx, cy, active);
+
+    if active {
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+    } else {
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+    }
+    cr.set_line_width(3.0);
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+
+    match action {
+        Action::Save => {
+            cr.move_to(cx - 7.0, cy + 0.5);
+            cr.line_to(cx - 2.0, cy + 6.0);
+            cr.line_to(cx + 7.5, cy - 6.0);
+        }
+        Action::Text => {
+            cr.move_to(cx - 6.5, cy - 6.0);
+            cr.line_to(cx + 6.5, cy - 6.0);
+            cr.move_to(cx, cy - 6.0);
+            cr.line_to(cx, cy + 7.0);
+        }
+    }
+    let _ = cr.stroke();
 }
 
 fn draw_check_button(cr: &gtk::cairo::Context, cx: f64, cy: f64) {
@@ -100,11 +153,7 @@ fn save_selection(
         .min(screenshot.height() as f64 - py)
         .max(1.0);
 
-    let out = gtk::cairo::ImageSurface::create(
-        gtk::cairo::Format::ARgb32,
-        pw as i32,
-        ph as i32,
-    )?;
+    let out = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, pw as i32, ph as i32)?;
 
     {
         let cr = gtk::cairo::Context::new(&out)?;
@@ -184,7 +233,7 @@ fn main() {
         let draw_selection = selection.clone();
         let draw_shot = screenshot.clone();
 
-        area.set_draw_func(move |_, cr, width, _height| {
+        area.set_draw_func(move |_, cr, _width, _height| {
             let s = draw_selection.borrow();
 
             let _ = cr.set_source_surface(&draw_shot, 0.0, 0.0);
@@ -212,8 +261,11 @@ fn main() {
                 let _ = cr.stroke();
 
                 if s.finished && w > 0.0 && h > 0.0 {
-                    let (cx, cy) = button_center(&s, width as f64);
-                    draw_check_button(cr, cx, cy);
+                    for (i, action) in BUTTONS.iter().enumerate() {
+                        let (cx, cy) = button_center(&s, i);
+                        let active = *action == Action::Text && s.text_mode;
+                        draw_button(cr, *action, cx, cy, active);
+                    }
                 }
             }
         });
@@ -229,27 +281,47 @@ fn main() {
             let area_w = drag_area.width() as f64;
             let area_h = drag_area.height() as f64;
 
-            let hit_button = {
+            let hit = {
                 let s = drag_selection.borrow();
                 let (_, _, w, h) = s.rect();
 
                 if s.finished && w > 0.0 && h > 0.0 {
-                    let (cx, cy) = button_center(&s, area_w);
-                    (x - cx).powi(2) + (y - cy).powi(2) <= BUTTON_RADIUS.powi(2)
+                    BUTTONS
+                        .iter()
+                        .enumerate()
+                        .find(|(i, _)| {
+                            let (cx, cy) = button_center(&s, *i);
+                            (x - cx).powi(2) + (y - cy).powi(2) <= BUTTON_RADIUS.powi(2)
+                        })
+                        .map(|(_, a)| *a)
                 } else {
-                    false
+                    None
                 }
             };
 
-            if hit_button {
-                let s = *drag_selection.borrow();
-
-                match save_selection(&drag_shot, &s, area_w, area_h) {
-                    Ok(path) => println!("Saved to {}", path.display()),
-                    Err(error) => eprintln!("Could not save selection: {error}"),
+            match hit {
+                Some(Action::Save) => {
+                    let s = *drag_selection.borrow();
+                    match save_selection(&drag_shot, &s, area_w, area_h) {
+                        Ok(path) => println!("Saved to {}", path.display()),
+                        Err(error) => eprintln!("Could not save selection: {error}"),
+                    }
+                    drag_window.close();
+                    return;
                 }
+                Some(Action::Text) => {
+                    {
+                        let mut s = drag_selection.borrow_mut();
+                        s.text_mode = !s.text_mode;
+                    }
+                    println!("Text mode toggled");
+                    drag_area.queue_draw();
+                    return;
+                }
+                None => {}
+            }
 
-                drag_window.close();
+            if drag_selection.borrow().text_mode {
                 return;
             }
 
@@ -260,6 +332,7 @@ fn main() {
                 end_y: y,
                 dragging: true,
                 finished: false,
+                text_mode: false,
             };
 
             drag_area.queue_draw();
@@ -304,10 +377,23 @@ fn main() {
 
         let keys = gtk::EventControllerKey::new();
         let close_window = window.clone();
+        let key_selection = selection.clone();
+        let key_area = area.clone();
 
         keys.connect_key_pressed(move |_, key, _, _| {
             if key == gtk::gdk::Key::Escape {
-                close_window.close();
+                let was_text_mode = {
+                    let mut s = key_selection.borrow_mut();
+                    let was = s.text_mode;
+                    s.text_mode = false;
+                    was
+                };
+
+                if was_text_mode {
+                    key_area.queue_draw();
+                } else {
+                    close_window.close();
+                }
                 return gtk::glib::Propagation::Stop;
             }
 
